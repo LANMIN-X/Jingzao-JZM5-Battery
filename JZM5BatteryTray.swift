@@ -10,12 +10,18 @@ private let productID = 0xD107
 private let productDisplayName = "京东京造 JZM5"
 private let appName = "京东京造 JZM5 电量"
 private let lastBatteryKey = "lastBattery"
+private let lastChargingKey = "lastCharging"
 private let nearcastGroupKey = "nearcastGroupID"
 
 private typealias PowerSourceID = UnsafeMutableRawPointer
 @_silgen_name("IOPSCreatePowerSource") private func IOPSCreatePowerSource(_ source: UnsafeMutablePointer<PowerSourceID?>) -> IOReturn
 @_silgen_name("IOPSSetPowerSourceDetails") private func IOPSSetPowerSourceDetails(_ source: PowerSourceID, _ details: CFDictionary) -> IOReturn
 @_silgen_name("IOPSReleasePowerSource") private func IOPSReleasePowerSource(_ source: PowerSourceID) -> IOReturn
+
+private struct BatteryReading: Equatable {
+    let percent: Int
+    let isCharging: Bool
+}
 
 private enum BridgeError: Error, CustomStringConvertible {
     case noReceiver, open(IOReturn), send(IOReturn), noResponse, powerSource(IOReturn)
@@ -43,7 +49,7 @@ private final class PowerSource {
         if let source { _ = IOPSReleasePowerSource(source) }
     }
 
-    func publish(_ battery: Int?) throws {
+    func publish(_ reading: BatteryReading?) throws {
         let details: [String: Any] = [
             "Name": productDisplayName,
             "Type": "Accessory Source",
@@ -53,9 +59,9 @@ private final class PowerSource {
             "Accessory Identifier": "JZM5-2.4G",
             "Vendor ID": vendorID,
             "Product ID": 0xD20F,
-            "Is Charging": false,
-            "Is Present": battery != nil,
-            "Current Capacity": battery ?? 0,
+            "Is Charging": reading?.isCharging ?? false,
+            "Is Present": reading != nil,
+            "Current Capacity": reading?.percent ?? 0,
             "Max Capacity": 100
         ]
         guard let source else { throw BridgeError.powerSource(kIOReturnNoDevice) }
@@ -71,7 +77,7 @@ private struct AirBatteryDevice: Encodable {
     let deviceName = productDisplayName
     let deviceModel = productDisplayName
     let batteryLevel: Int
-    let isCharging = 0
+    let isCharging: Int
     let isCharged = false
     let isPaused = false
     let acPowered = false
@@ -101,8 +107,8 @@ private final class NearcastSender: NSObject, MCNearbyServiceBrowserDelegate, MC
     private lazy var browser = MCNearbyServiceBrowser(peer: peer, serviceType: "airbattery-nc")
     private lazy var advertiser = MCNearbyServiceAdvertiser(peer: peer, discoveryInfo: nil, serviceType: "airbattery-nc")
     private let requestRefresh: () -> Void
-    private var latestBattery: Int?
-    private var lastSentBattery: Int?
+    private var latestReading: BatteryReading?
+    private var lastSentReading: BatteryReading?
 
     init?(groupID: String, requestRefresh: @escaping () -> Void) {
         guard groupID.hasPrefix("nc-"), groupID.count >= 23 else { return nil }
@@ -119,21 +125,21 @@ private final class NearcastSender: NSObject, MCNearbyServiceBrowserDelegate, MC
         browser.startBrowsingForPeers()
     }
 
-    func update(_ battery: Int) {
-        latestBattery = battery
-        _ = send(battery: battery, hasBattery: true, refresh: lastSentBattery != battery)
+    func update(_ reading: BatteryReading) {
+        latestReading = reading
+        _ = send(reading: reading, hasBattery: true, refresh: lastSentReading != reading)
     }
 
     @discardableResult
     func sendOffline() -> Bool {
-        guard let battery = latestBattery ?? lastSentBattery else { return false }
-        return send(battery: battery, hasBattery: false, refresh: false)
+        guard let reading = latestReading ?? lastSentReading else { return false }
+        return send(reading: reading, hasBattery: false, refresh: false)
     }
 
-    private func send(battery: Int, hasBattery: Bool, refresh: Bool) -> Bool {
+    private func send(reading: BatteryReading, hasBattery: Bool, refresh: Bool) -> Bool {
         guard !session.connectedPeers.isEmpty else { return false }
         do {
-            let device = AirBatteryDevice(hasBattery: hasBattery, batteryLevel: battery, lastUpdate: Date().timeIntervalSince1970)
+            let device = AirBatteryDevice(hasBattery: hasBattery, batteryLevel: reading.percent, isCharging: reading.isCharging ? 1 : 0, lastUpdate: Date().timeIntervalSince1970)
             let devices = try JSONEncoder().encode([device])
             guard let json = String(data: devices, encoding: .utf8) else { return false }
             let key = Self.key(for: groupID)
@@ -143,7 +149,7 @@ private final class NearcastSender: NSObject, MCNearbyServiceBrowserDelegate, MC
             let payload = try JSONEncoder().encode(message)
             let envelope = try JSONEncoder().encode(MultipeerEnvelope(payload: payload))
             try session.send(envelope, toPeers: session.connectedPeers, with: .reliable)
-            if hasBattery { lastSentBattery = battery }
+            if hasBattery { lastSentReading = reading }
             if refresh { requestRefresh() }
             return true
         } catch {
@@ -177,8 +183,8 @@ private final class NearcastSender: NSObject, MCNearbyServiceBrowserDelegate, MC
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         guard state == .connected else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, let battery = self.latestBattery else { return }
-            _ = self.send(battery: battery, hasBattery: true, refresh: true)
+            guard let self, let reading = self.latestReading else { return }
+            _ = self.send(reading: reading, hasBattery: true, refresh: true)
         }
     }
 
@@ -190,7 +196,7 @@ private final class NearcastSender: NSObject, MCNearbyServiceBrowserDelegate, MC
 
 private final class QueryState {
     let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 256)
-    var battery: Int?
+    var reading: BatteryReading?
 
     init() { buffer.initialize(repeating: 0, count: 256) }
     deinit { buffer.deinitialize(count: 256); buffer.deallocate() }
@@ -207,10 +213,10 @@ private let inputCallback: IOHIDReportCallback = { context, _, _, _, reportID, r
     var bytes = Array(UnsafeBufferPointer(start: report, count: length))
     if bytes.first == 0xB4 { bytes.removeFirst() }
     guard bytes.count > 19, bytes[0] == 0x06 else { return }
-    state.battery = Int(bytes[19] & 0x7F)
+    state.reading = BatteryReading(percent: Int(bytes[19] & 0x7F), isCharging: (bytes[19] & 0x80) != 0)
 }
 
-private func readJZM5Battery() throws -> Int {
+private func readJZM5Battery() throws -> BatteryReading {
     let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
     IOHIDManagerSetDeviceMatching(manager, [kIOHIDVendorIDKey as String: vendorID, kIOHIDProductIDKey as String: productID] as CFDictionary)
     let managerResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -240,11 +246,11 @@ private func readJZM5Battery() throws -> Int {
     guard result == kIOReturnSuccess else { throw BridgeError.send(result) }
 
     let deadline = Date().addingTimeInterval(3)
-    while state.battery == nil && Date() < deadline {
+    while state.reading == nil && Date() < deadline {
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
     }
-    guard let battery = state.battery else { throw BridgeError.noResponse }
-    return battery
+    guard let reading = state.reading else { throw BridgeError.noResponse }
+    return reading
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -252,7 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var timer: Timer?
     private var powerSource: PowerSource?
     private var nearcast: NearcastSender?
-    private var lastBattery: Int?
+    private var lastReading: BatteryReading?
     private var launchItem: NSMenuItem?
     private var permissionItem: NSMenuItem?
 
@@ -278,8 +284,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         do {
             powerSource = try PowerSource()
-            lastBattery = UserDefaults.standard.object(forKey: lastBatteryKey) as? Int
-            if let lastBattery { try powerSource?.publish(lastBattery) }
+            if let battery = UserDefaults.standard.object(forKey: lastBatteryKey) as? Int {
+                lastReading = BatteryReading(percent: battery, isCharging: UserDefaults.standard.integer(forKey: lastChargingKey) == 1)
+                try powerSource?.publish(lastReading)
+            }
         } catch { present(error) }
         startNearcastIfConfigured()
         DispatchQueue.main.async { [weak self] in self?.updateBattery() }
@@ -318,12 +326,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateBattery() {
         do {
-            let battery = try readJZM5Battery()
-            lastBattery = battery
-            UserDefaults.standard.set(battery, forKey: lastBatteryKey)
-            try powerSource?.publish(battery)
+            let reading = try readJZM5Battery()
+            lastReading = reading
+            UserDefaults.standard.set(reading.percent, forKey: lastBatteryKey)
+            UserDefaults.standard.set(reading.isCharging ? 1 : 0, forKey: lastChargingKey)
+            try powerSource?.publish(reading)
             startNearcastIfConfigured()
-            nearcast?.update(battery)
+            nearcast?.update(reading)
         } catch {
             NSLog("\(appName): \(error)")
         }
@@ -335,7 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let sender = NearcastSender(groupID: groupID, requestRefresh: refreshAirBattery) else { return }
         nearcast = sender
         sender.start()
-        if let lastBattery { sender.update(lastBattery) }
+        if let lastReading { sender.update(lastReading) }
     }
 
     private func refreshAirBattery() {

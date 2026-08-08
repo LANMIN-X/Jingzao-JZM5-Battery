@@ -2,7 +2,7 @@
 
 让 macOS 电池小组件和 [AirBattery](https://github.com/lihaoyun6/AirBattery) 显示京东京造 JZM5 的 2.4G 模式电量。
 
-程序直接读取接收器的私有 HID 电量报告，每分钟更新一次，并在菜单栏提供权限状态、开机启动和退出选项。它不会修改 AirBattery，也不会写入 AirBattery 的容器目录。
+程序直接读取接收器的私有 HID 电量报告，每分钟更新一次电量和充电状态，并在菜单栏提供权限状态、开机启动和退出选项。它不会修改 AirBattery，也不会写入 AirBattery 的容器目录。
 
 ![macOS 电池小组件显示京东京造 JZM5 电量](assets/macos-battery-widgets.png)
 
