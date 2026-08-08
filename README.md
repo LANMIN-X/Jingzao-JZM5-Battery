@@ -4,6 +4,8 @@
 
 程序直接读取接收器的私有 HID 电量报告，每分钟更新一次，并在菜单栏提供权限状态、开机启动和退出选项。它不会修改 AirBattery，也不会写入 AirBattery 的容器目录。
 
+![macOS 电池小组件显示京东京造 JZM5 电量](assets/macos-battery-widgets.png)
+
 ## 下载与启动
 
 1. 从 Releases 下载 `JZM5BatteryTray.app.zip`，解压后把应用拖到“应用程序”。
@@ -58,3 +60,8 @@ open dist/JZM5BatteryTray.app
 ## 工作原理
 
 程序在接收器的 `Usage Page 0x008C / Usage 0x01` 接口发送 Output Report `0xB3 + 0x06`，从 Input Report `0xB4` 的第 19 字节解析电量。随后将电量发布为 macOS Accessory Power Source，并可选通过 AirBattery Nearcast 在本机同步。
+
+## Contributors
+
+- LANMIN-X
+- OpenAI Codex：协助协议分析、macOS 桥接实现与文档整理
