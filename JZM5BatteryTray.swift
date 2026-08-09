@@ -17,9 +17,9 @@ private struct BatteryReading: Equatable {
     let isCharging: Bool
 }
 
-// MARK: - Device adapter
-// To support another mouse, start here. The rest of the app only consumes
-// BatteryReading and does not know the device's private HID protocol.
+// MARK: - 设备适配
+// 适配其他鼠标时从这里开始。其余代码只使用 BatteryReading，
+// 不需要了解设备的私有 HID 协议。
 private enum DeviceAdapter {
     static let displayName = "京东京造 JZM5"
     static let appName = "京东京造 JZM5 电量"
@@ -37,8 +37,8 @@ private enum DeviceAdapter {
     static let reportLength = 64
     static let timeout: TimeInterval = 3
 
-    // IOKit expects this device's Report ID at byte 0 as well as in the
-    // IOHIDDeviceSetReport reportID argument. The WebHID payload begins at byte 1.
+    // IOKit 要求 Report ID 既作为 IOHIDDeviceSetReport 的参数传入，
+    // 也放在缓冲区第 0 字节；WebHID 的 Payload 从第 1 字节开始。
     static func makeQueryReport() -> [UInt8] {
         var report = [UInt8](repeating: 0, count: reportLength)
         report[0] = UInt8(outputReportID)
