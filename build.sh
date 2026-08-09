@@ -3,6 +3,7 @@ set -euo pipefail
 
 project_dir=${0:A:h}
 app="$project_dir/dist/JZM5BatteryTray.app"
+signing_identity=${CODE_SIGN_IDENTITY:--}
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
@@ -16,5 +17,5 @@ swiftc "$project_dir/JZM5BatteryTray.swift" \
   -framework ServiceManagement \
   -o "$app/Contents/MacOS/JZM5BatteryTray"
 
-codesign --force --deep --sign - "$app"
+codesign --force --deep --sign "$signing_identity" "$app"
 echo "$app"

@@ -5,12 +5,6 @@ import IOKit.hid
 import MultipeerConnectivity
 import ServiceManagement
 
-private let vendorID = 0x362D
-private let productID = 0xD107
-private let productDisplayName = "京东京造 JZM5"
-private let appName = "京东京造 JZM5 电量"
-private let lastBatteryKey = "lastBattery"
-private let lastChargingKey = "lastCharging"
 private let nearcastGroupKey = "nearcastGroupID"
 
 private typealias PowerSourceID = UnsafeMutableRawPointer
@@ -23,15 +17,56 @@ private struct BatteryReading: Equatable {
     let isCharging: Bool
 }
 
+// MARK: - Device adapter
+// To support another mouse, start here. The rest of the app only consumes
+// BatteryReading and does not know the device's private HID protocol.
+private enum DeviceAdapter {
+    static let displayName = "京东京造 JZM5"
+    static let appName = "京东京造 JZM5 电量"
+    static let accessoryIdentifier = "JZM5-2.4G"
+    static let deviceType = "Mouse"
+
+    static let receiverVendorID = 0x362D
+    static let receiverProductID = 0xD107
+    static let accessoryProductID = 0xD20F
+    static let usagePage = 0x008C
+    static let usage = 0x0001
+
+    static let outputReportID: CFIndex = 0xB3
+    static let inputReportID: UInt32 = 0xB4
+    static let reportLength = 64
+    static let timeout: TimeInterval = 3
+
+    // IOKit expects this device's Report ID at byte 0 as well as in the
+    // IOHIDDeviceSetReport reportID argument. The WebHID payload begins at byte 1.
+    static func makeQueryReport() -> [UInt8] {
+        var report = [UInt8](repeating: 0, count: reportLength)
+        report[0] = UInt8(outputReportID)
+        report[1] = 0x06
+        return report
+    }
+
+    static func parse(reportID: UInt32, bytes: [UInt8]) -> BatteryReading? {
+        guard reportID == inputReportID else { return nil }
+        var payload = bytes
+        if payload.first == UInt8(inputReportID) { payload.removeFirst() }
+        guard payload.count > 19, payload[0] == 0x06 else { return nil }
+        return BatteryReading(
+            percent: Int(payload[19] & 0x7F),
+            isCharging: (payload[19] & 0x80) != 0
+        )
+    }
+}
+
 private enum BridgeError: Error, CustomStringConvertible {
     case noReceiver, open(IOReturn), send(IOReturn), noResponse, powerSource(IOReturn)
 
     var description: String {
         switch self {
-        case .noReceiver: return "未找到 JZ M5 2.4G 接收器"
+        case .noReceiver: return "未找到 \(DeviceAdapter.displayName) 接收器"
         case .open(let result): return "打开 HID 接收器失败：0x\(String(UInt32(bitPattern: result), radix: 16, uppercase: true))"
         case .send(let result): return "发送查询失败：0x\(String(UInt32(bitPattern: result), radix: 16, uppercase: true))"
-        case .noResponse: return "3 秒内未收到 B4/06 电量回包"
+        case .noResponse: return "\(Int(DeviceAdapter.timeout)) 秒内未收到有效电量回包"
         case .powerSource(let result): return "发布系统电源项失败：0x\(String(UInt32(bitPattern: result), radix: 16, uppercase: true))"
         }
     }
@@ -51,14 +86,14 @@ private final class PowerSource {
 
     func publish(_ reading: BatteryReading?) throws {
         let details: [String: Any] = [
-            "Name": productDisplayName,
+            "Name": DeviceAdapter.displayName,
             "Type": "Accessory Source",
             "Power Source State": "Battery Power",
             "Transport Type": "USB",
-            "Accessory Category": "Mouse",
-            "Accessory Identifier": "JZM5-2.4G",
-            "Vendor ID": vendorID,
-            "Product ID": 0xD20F,
+            "Accessory Category": DeviceAdapter.deviceType,
+            "Accessory Identifier": DeviceAdapter.accessoryIdentifier,
+            "Vendor ID": DeviceAdapter.receiverVendorID,
+            "Product ID": DeviceAdapter.accessoryProductID,
             "Is Charging": reading?.isCharging ?? false,
             "Is Present": reading != nil,
             "Current Capacity": reading?.percent ?? 0,
@@ -72,10 +107,10 @@ private final class PowerSource {
 
 private struct AirBatteryDevice: Encodable {
     let hasBattery: Bool
-    let deviceID = "JZM5-2.4G"
-    let deviceType = "Mouse"
-    let deviceName = productDisplayName
-    let deviceModel = productDisplayName
+    let deviceID = DeviceAdapter.accessoryIdentifier
+    let deviceType = DeviceAdapter.deviceType
+    let deviceName = DeviceAdapter.displayName
+    let deviceModel = DeviceAdapter.displayName
     let batteryLevel: Int
     let isCharging: Int
     let isCharged = false
@@ -102,7 +137,7 @@ private struct MultipeerEnvelope: Encodable {
 
 private final class NearcastSender: NSObject, MCNearbyServiceBrowserDelegate, MCNearbyServiceAdvertiserDelegate, MCSessionDelegate {
     private let groupID: String
-    private let peer = MCPeerID(displayName: "京东京造 JZM5")
+    private let peer = MCPeerID(displayName: DeviceAdapter.displayName)
     private lazy var session = MCSession(peer: peer, securityIdentity: nil, encryptionPreference: .none)
     private lazy var browser = MCNearbyServiceBrowser(peer: peer, serviceType: "airbattery-nc")
     private lazy var advertiser = MCNearbyServiceAdvertiser(peer: peer, discoveryInfo: nil, serviceType: "airbattery-nc")
@@ -145,7 +180,7 @@ private final class NearcastSender: NSObject, MCNearbyServiceBrowserDelegate, MC
             let key = Self.key(for: groupID)
             let sealed = try AES.GCM.seal(Data(json.utf8), using: key)
             guard let encrypted = sealed.combined?.base64EncodedString() else { return false }
-            let message = NearcastMessage(id: String(groupID.prefix(15)), sender: "JZM5-2.4G", command: "", content: encrypted)
+            let message = NearcastMessage(id: String(groupID.prefix(15)), sender: DeviceAdapter.accessoryIdentifier, command: "", content: encrypted)
             let payload = try JSONEncoder().encode(message)
             let envelope = try JSONEncoder().encode(MultipeerEnvelope(payload: payload))
             try session.send(envelope, toPeers: session.connectedPeers, with: .reliable)
@@ -208,23 +243,26 @@ private func number(_ device: IOHIDDevice, _ key: CFString) -> Int? {
 }
 
 private let inputCallback: IOHIDReportCallback = { context, _, _, _, reportID, report, length in
-    guard let context, reportID == 0xB4 else { return }
+    guard let context else { return }
     let state = Unmanaged<QueryState>.fromOpaque(context).takeUnretainedValue()
-    var bytes = Array(UnsafeBufferPointer(start: report, count: length))
-    if bytes.first == 0xB4 { bytes.removeFirst() }
-    guard bytes.count > 19, bytes[0] == 0x06 else { return }
-    state.reading = BatteryReading(percent: Int(bytes[19] & 0x7F), isCharging: (bytes[19] & 0x80) != 0)
+    let bytes = Array(UnsafeBufferPointer(start: report, count: length))
+    guard let reading = DeviceAdapter.parse(reportID: reportID, bytes: bytes) else { return }
+    state.reading = reading
 }
 
-private func readJZM5Battery() throws -> BatteryReading {
+private func readBattery() throws -> BatteryReading {
     let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-    IOHIDManagerSetDeviceMatching(manager, [kIOHIDVendorIDKey as String: vendorID, kIOHIDProductIDKey as String: productID] as CFDictionary)
+    IOHIDManagerSetDeviceMatching(manager, [
+        kIOHIDVendorIDKey as String: DeviceAdapter.receiverVendorID,
+        kIOHIDProductIDKey as String: DeviceAdapter.receiverProductID
+    ] as CFDictionary)
     let managerResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     guard managerResult == kIOReturnSuccess else { throw BridgeError.open(managerResult) }
     defer { IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone)) }
 
     guard let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>, let receiver = devices.first(where: {
-        number($0, kIOHIDPrimaryUsagePageKey as CFString) == 0x008C && number($0, kIOHIDPrimaryUsageKey as CFString) == 0x0001
+        number($0, kIOHIDPrimaryUsagePageKey as CFString) == DeviceAdapter.usagePage &&
+        number($0, kIOHIDPrimaryUsageKey as CFString) == DeviceAdapter.usage
     }) else { throw BridgeError.noReceiver }
     let openResult = IOHIDDeviceOpen(receiver, IOOptionBits(kIOHIDOptionsTypeNone))
     guard openResult == kIOReturnSuccess else { throw BridgeError.open(openResult) }
@@ -237,15 +275,13 @@ private func readJZM5Battery() throws -> BatteryReading {
     IOHIDDeviceScheduleWithRunLoop(receiver, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
     defer { IOHIDDeviceUnscheduleFromRunLoop(receiver, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue) }
 
-    var request = [UInt8](repeating: 0, count: 64)
-    request[0] = 0xB3
-    request[1] = 0x06
+    let request = DeviceAdapter.makeQueryReport()
     let result = request.withUnsafeBytes {
-        IOHIDDeviceSetReport(receiver, kIOHIDReportTypeOutput, 0xB3, $0.bindMemory(to: UInt8.self).baseAddress!, request.count)
+        IOHIDDeviceSetReport(receiver, kIOHIDReportTypeOutput, DeviceAdapter.outputReportID, $0.bindMemory(to: UInt8.self).baseAddress!, request.count)
     }
     guard result == kIOReturnSuccess else { throw BridgeError.send(result) }
 
-    let deadline = Date().addingTimeInterval(3)
+    let deadline = Date().addingTimeInterval(DeviceAdapter.timeout)
     while state.reading == nil && Date() < deadline {
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
     }
@@ -279,18 +315,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quit.target = self
         menu.addItem(quit)
         statusItem.menu = menu
-        statusItem.button?.image = NSImage(systemSymbolName: "computermouse", accessibilityDescription: appName)
+        statusItem.button?.image = NSImage(systemSymbolName: "computermouse", accessibilityDescription: DeviceAdapter.appName)
         statusItem.button?.image?.isTemplate = true
 
-        do {
-            powerSource = try PowerSource()
-            if let battery = UserDefaults.standard.object(forKey: lastBatteryKey) as? Int {
-                lastReading = BatteryReading(percent: battery, isCharging: UserDefaults.standard.integer(forKey: lastChargingKey) == 1)
-                try powerSource?.publish(lastReading)
-            }
-        } catch { present(error) }
         startNearcastIfConfigured()
         DispatchQueue.main.async { [weak self] in self?.updateBattery() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.lastReading == nil else { return }
+            self.updateBattery()
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.updateBattery() }
     }
 
@@ -310,7 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alert = NSAlert()
         alert.messageText = "需要输入监控权限"
-        alert.informativeText = "请在系统设置的“隐私与安全性 → 输入监控”中允许 JZ M5 电量。"
+        alert.informativeText = "请在系统设置的“隐私与安全性 → 输入监控”中允许 \(DeviceAdapter.appName)。"
         alert.addButton(withTitle: "打开系统设置")
         alert.addButton(withTitle: "稍后处理")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -326,15 +359,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateBattery() {
         do {
-            let reading = try readJZM5Battery()
+            let reading = try readBattery()
             lastReading = reading
-            UserDefaults.standard.set(reading.percent, forKey: lastBatteryKey)
-            UserDefaults.standard.set(reading.isCharging ? 1 : 0, forKey: lastChargingKey)
+            if powerSource == nil { powerSource = try PowerSource() }
             try powerSource?.publish(reading)
             startNearcastIfConfigured()
             nearcast?.update(reading)
         } catch {
-            NSLog("\(appName): \(error)")
+            NSLog("\(DeviceAdapter.appName): \(error)")
         }
     }
 
@@ -348,19 +380,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshAirBattery() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NSWorkspace.shared.open(URL(string: "airbattery://reloadwingets")!)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.openAirBatteryRefresh()
+        }
+    }
+
+    private func openAirBatteryRefresh() {
+        guard let url = URL(string: "airbattery://reloadwingets") else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        NSWorkspace.shared.open(url, configuration: configuration) { _, error in
+            if let error { NSLog("AirBattery 后台刷新失败：\(error)") }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         guard nearcast?.sendOffline() == true else { return }
         Thread.sleep(forTimeInterval: 0.3)
-        NSWorkspace.shared.open(URL(string: "airbattery://reloadwingets")!)
+        openAirBatteryRefresh()
     }
 
     private func present(_ error: Error) {
-        NSLog("\(appName): \(error)")
+        NSLog("\(DeviceAdapter.appName): \(error)")
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
