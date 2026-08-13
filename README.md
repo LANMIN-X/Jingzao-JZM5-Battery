@@ -44,7 +44,7 @@ AirBattery 不是必需的；macOS 电池小组件可由本程序独立更新。
 - 应用退出后，macOS 电源项会消失；AirBattery 会收到离线状态，但其界面或小组件可能要等下一次时间线刷新才消失。
 - 系统电池小组件的刷新由 macOS 调度，显示可能比真实电量晚一个刷新周期。
 - 系统电源项使用 macOS 的非公开 IOKit 接口，未来系统版本可能改变行为。
-- Release 为 Apple Silicon（arm64）版本。Intel Mac 可从源码自行构建。
+- 仅支持 Apple Silicon（arm64），不支持 Intel Mac。
 
 ## 从源码构建
 
@@ -226,3 +226,7 @@ printf '%d\n' 0xD107
 
 - LANMIN-X
 - OpenAI Codex：协助协议分析、macOS 桥接实现与文档整理
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。

@@ -10,6 +10,7 @@ mkdir -p "$app/Contents/MacOS"
 cp "$project_dir/Info.plist" "$app/Contents/Info.plist"
 
 swiftc "$project_dir/JZM5BatteryTray.swift" \
+  -target arm64-apple-macos13.0 \
   -framework AppKit \
   -framework IOKit \
   -framework CoreFoundation \
